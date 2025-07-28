@@ -1,0 +1,15 @@
+{
+    "from": "ams",
+    "to": "bkkt",
+    "adults": 2,
+    "children": 0,
+    "cabin": "economy",
+        
+    "vacation_days": 21,
+    "days_clearance": 3,
+    
+    "search_start_date": "2025-07-29",
+    "search_end_date": "2025-08-21",
+    
+    "start_from_search": 1
+}
