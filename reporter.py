@@ -5,13 +5,9 @@ from typing import List, Dict, Any
 import re
 
 def extract_route_from_filename(filename: str) -> tuple:
-    match = re.search(r'complete_(\d{8})_(\d{8})_([A-Z]+)v_([A-Z]+)\.json', filename)
+    match = re.search(r'complete_(\d{8})_(\d{8})', filename)
     if match:
-        dep_date = match.group(1)
-        ret_date = match.group(2)
-        origin = match.group(3)
-        destination = match.group(4)
-        return dep_date, ret_date, origin, destination
+        return match.group(1), match.group(2), None, None
     return None, None, None, None
 
 def parse_datetime(dt_str: str) -> datetime:
@@ -425,6 +421,11 @@ def generate_html_report(flights: List[Dict[str, Any]], output_file: str = "skys
             color: #666;
             border-top: 1px solid #dee2e6;
         }}
+        .export-btn {{
+            padding: 8px 16px; background: #667eea; color: white; border: none;
+            border-radius: 4px; cursor: pointer; font-weight: 600;
+        }}
+        .export-btn:disabled {{ opacity: .6; cursor: wait; }}
         @media (max-width: 768px) {{
             .header h1 {{
                 font-size: 1.8em;
@@ -497,6 +498,8 @@ def generate_html_report(flights: List[Dict[str, Any]], output_file: str = "skys
                 <input type="number" id="totalDurationFilter" placeholder="e.g. 24">
                 
                 <button onclick="clearFilters()" style="padding: 8px 16px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer;">Clear Filters</button>
+
+                <button id="exportBtn" class="export-btn" onclick="exportImage()">📸 Exporteer als afbeelding</button>
             </div>
         </div>
         
@@ -691,6 +694,132 @@ def generate_html_report(flights: List[Dict[str, Any]], output_file: str = "skys
         document.getElementById('outboundDurationFilter').addEventListener('input', applyFilters);
         document.getElementById('returnDurationFilter').addEventListener('input', applyFilters);
         document.getElementById('totalDurationFilter').addEventListener('input', applyFilters);
+
+        const NL_MONTHS = ['jan','feb','mrt','apr','mei','jun','jul','aug','sep','okt','nov','dec'];
+        const EXPORT_MAX = 50;
+        const FONT = "'Segoe UI', -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif";
+
+        function fmtDT(s) {{
+            if (!s || s === 'N/A') return '?';
+            const [d, t] = s.split(' ');
+            const [y, m, day] = d.split('-').map(Number);
+            return `${{day}} ${{NL_MONTHS[m - 1]}} ${{t || ''}}`.trim();
+        }}
+        function fmtDur(min) {{
+            if (!min) return '?';
+            return `${{Math.floor(min / 60)}}u${{String(min % 60).padStart(2, '0')}}`;
+        }}
+        function tripDays(f) {{
+            const a = (f.departure_date && f.departure_date !== 'N/A') ? f.departure_date : (f.outbound_departure || '').split(' ')[0];
+            const b = (f.return_date && f.return_date !== 'N/A') ? f.return_date : (f.return_departure || '').split(' ')[0];
+            const n = Math.round((new Date(b) - new Date(a)) / 86400000);
+            return isNaN(n) ? '' : `${{n}} dagen`;
+        }}
+        function stopsText(f, which) {{
+            const stops = f[which + '_stops'];
+            if (!stops) return null;
+            const txt = (f[which + '_stop_countries'] || '')
+                .replace(/\\(([^,()]+), ([^)]*?) layover\\)/g, '($2)')
+                .replace(/(\\d+)h (\\d+)m/g, (m, h, mm) => `${{h}}u${{mm.padStart(2, '0')}}`);
+            return `${{stops}} stop: ${{txt}}`;
+        }}
+        function filterSummary() {{
+            const parts = [];
+            const v = id => document.getElementById(id).value;
+            if (v('priceFilter')) parts.push(`max € ${{v('priceFilter')}}`);
+            if (v('outboundDurationFilter')) parts.push(`heen max ${{v('outboundDurationFilter')}}u`);
+            if (v('returnDurationFilter')) parts.push(`terug max ${{v('returnDurationFilter')}}u`);
+            if (v('totalDurationFilter')) parts.push(`totaal max ${{v('totalDurationFilter')}}u vliegen`);
+            if (document.getElementById('directFilter').checked) parts.push('alleen direct');
+            if (v('airlineFilter')) parts.push(v('airlineFilter'));
+            return parts.join(' · ');
+        }}
+        function exportList() {{
+            let list = [...filteredFlights];
+            if (currentSort.column === -1) list.sort((a, b) => a.price_raw - b.price_raw);
+            const seen = new Set();
+            return list.filter(f => {{
+                const k = f.itinerary_id + '|' + f.price_raw;
+                if (seen.has(k)) return false;
+                seen.add(k); return true;
+            }});
+        }}
+
+        function drawRun(ctx, x, y, pieces, maxX) {{
+            for (const p of pieces) {{
+                ctx.font = `${{p.weight || 400}} ${{p.size || 14}}px ${{FONT}}`;
+                ctx.fillStyle = p.color || '#1f2933';
+                let t = p.text;
+                if (x + ctx.measureText(t).width > maxX) {{
+                    while (t.length && x + ctx.measureText(t + '…').width > maxX) t = t.slice(0, -1);
+                    ctx.fillText(t + '…', x, y);
+                    return;
+                }}
+                ctx.fillText(t, x, y);
+                x += ctx.measureText(t).width;
+            }}
+        }}
+        function legPieces(f, which) {{
+            const sep = {{ text: '  ·  ', color: '#9aa5b1' }};
+            const st = stopsText(f, which);
+            return [
+                {{ text: `${{fmtDT(f[which + '_departure'])}} → ${{fmtDT(f[which + '_arrival'])}}` }},
+                sep, {{ text: fmtDur(f[which + '_duration_raw']), weight: 700 }},
+                sep, st ? {{ text: st, color: '#c2410c', size: 13 }} : {{ text: 'Direct', color: '#15803d', weight: 700, size: 13 }},
+                sep, {{ text: f[which + '_airline'] || '', color: '#52606d', size: 13 }},
+            ];
+        }}
+
+        function drawExport(list, total) {{
+            const W = 1000, HEAD = 112, ROW = 96, FOOT = 56, PAD = 28, SCALE = 2;
+            const H = HEAD + 12 + list.length * ROW + FOOT;
+            const canvas = document.createElement('canvas');
+            canvas.width = W * SCALE; canvas.height = H * SCALE;
+            const ctx = canvas.getContext('2d');
+            ctx.scale(SCALE, SCALE);
+            ctx.textBaseline = 'alphabetic';
+
+            ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+            const g = ctx.createLinearGradient(0, 0, W, HEAD);
+            g.addColorStop(0, '#667eea'); g.addColorStop(1, '#764ba2');
+            ctx.fillStyle = g; ctx.fillRect(0, 0, W, HEAD);
+
+            const route = list[0] ? list[0].route : '';
+            drawRun(ctx, PAD, 52, [{{ text: `✈  ${{route}}  ·  ${{list.length}} beste opties`, size: 30, weight: 700, color: '#ffffff' }}], W - PAD);
+            const summary = filterSummary();
+            drawRun(ctx, PAD, 84, [{{ text: (summary ? summary + '  ·  ' : '') + 'retour, prijs per persoon', size: 16, color: 'rgba(255,255,255,0.9)' }}], W - PAD);
+
+            list.forEach((f, i) => {{
+                const top = HEAD + 12 + i * ROW;
+                if (i % 2 === 1) {{ ctx.fillStyle = '#f8f9fc'; ctx.fillRect(0, top, W, ROW); }}
+                drawRun(ctx, PAD, top + 40, [{{ text: `#${{i + 1}}`, size: 15, weight: 700, color: '#9aa5b1' }}], 80);
+                drawRun(ctx, 76, top + 44, [{{ text: `€ ${{Math.round(f.price_raw)}}`, size: 28, weight: 700 }}], 200);
+                drawRun(ctx, 76, top + 68, [{{ text: tripDays(f), size: 14, weight: 700, color: '#667eea' }}], 200);
+                drawRun(ctx, 210, top + 38, [{{ text: 'Heen', weight: 700, color: '#52606d' }}], 262);
+                drawRun(ctx, 262, top + 38, legPieces(f, 'outbound'), W - PAD);
+                drawRun(ctx, 210, top + 68, [{{ text: 'Terug', weight: 700, color: '#52606d' }}], 262);
+                drawRun(ctx, 262, top + 68, legPieces(f, 'return'), W - PAD);
+                ctx.fillStyle = '#e5e7eb'; ctx.fillRect(PAD, top + ROW - 1, W - 2 * PAD, 1);
+            }});
+
+            const foot = (total > list.length ? `Top ${{list.length}} van ${{total}} resultaten  ·  ` : '') +
+                'Skyscanner-prijzen opgehaald op {generation_time} — prijzen kunnen inmiddels veranderd zijn.';
+            drawRun(ctx, PAD, H - 22, [{{ text: foot, size: 12, color: '#9aa5b1' }}], W - PAD);
+            return canvas;
+        }}
+
+        function exportImage() {{
+            const list = exportList();
+            if (!list.length) {{ alert('Geen resultaten om te exporteren.'); return; }}
+            const canvas = drawExport(list.slice(0, EXPORT_MAX), list.length);
+            canvas.toBlob(blob => {{
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `vluchten_${{new Date().toISOString().slice(0, 10)}}.png`;
+                document.body.appendChild(a); a.click(); a.remove();
+                setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+            }}, 'image/png');
+        }}
 
         populateFilters();
         renderTable();
