@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<meta name="description" content="Return fares for every date combination of one search run, with a fare grid, filters and sorting.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chivo+Mono:wght@400;500;800&display=swap" rel="stylesheet">
+<style>
+/*__CSS__*/
+</style>
+</head>
+<body>
+<a class="skip" href="#board">Skip to flights</a>
+
+<header class="bar">
+  <div class="container bar__in">
+    <p class="wordmark">skyscannerplus</p>
+    <dl class="facts" id="facts"></dl>
+  </div>
+</header>
+
+<main id="main">
+  <section class="summary">
+    <div class="container summary__in">
+      <div class="summary__lead">
+        <h1 id="route">Fare report</h1>
+        <p class="summary__sub" id="sub"></p>
+        <dl class="plate">
+          <dt>Cheapest fare</dt>
+          <dd class="figure" id="best-price"></dd>
+          <dd class="plate__line" id="best-dates"></dd>
+          <dd class="plate__line" id="best-airline"></dd>
+        </dl>
+        <dl class="stats">
+          <div><dt>Flight options</dt><dd id="stat-count"></dd></div>
+          <div><dt>Routes</dt><dd id="stat-routes"></dd></div>
+          <div><dt>Average price</dt><dd id="stat-avg"></dd></div>
+          <div><dt>Direct both ways</dt><dd id="stat-direct"></dd></div>
+        </dl>
+      </div>
+      <div class="summary__grid">
+        <h2 id="grid-title">Cheapest fare by date</h2>
+        <p class="hint">Darker is cheaper. Select a fare to list its flights.</p>
+        <div class="grid-scroll" tabindex="0" role="region" aria-labelledby="grid-title">
+          <table class="grid" id="grid"></table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="filters">
+    <div class="container">
+      <details id="filters" open>
+        <summary>Filters</summary>
+        <form id="filter-form" autocomplete="off">
+          <div class="filters__fields">
+          <div class="field" id="route-field">
+            <label for="f-route">Route</label>
+            <select class="input" id="f-route" name="route"><option value="">All routes</option></select>
+          </div>
+          <div class="field">
+            <label for="f-airline">Airline</label>
+            <select class="input" id="f-airline" name="airline"><option value="">All airlines</option></select>
+          </div>
+          <div class="field">
+            <label for="f-price">Max price, €</label>
+            <input class="input input--num" id="f-price" name="price" type="number" inputmode="numeric" min="0" placeholder="1000">
+          </div>
+          <div class="field">
+            <label for="f-out">Max outbound, hours</label>
+            <input class="input input--num" id="f-out" name="out" type="number" inputmode="numeric" min="0" placeholder="12">
+          </div>
+          <div class="field">
+            <label for="f-back">Max return, hours</label>
+            <input class="input input--num" id="f-back" name="back" type="number" inputmode="numeric" min="0" placeholder="12">
+          </div>
+          <div class="field">
+            <label for="f-total">Max total, hours</label>
+            <input class="input input--num" id="f-total" name="total" type="number" inputmode="numeric" min="0" placeholder="24">
+          </div>
+          <label class="check" for="f-direct">
+            <input id="f-direct" name="direct" type="checkbox">
+            Direct flights only
+          </label>
+          </div>
+          <div class="filters__actions">
+            <button class="btn" type="button" id="clear">Clear filters</button>
+            <button class="btn btn--primary" type="button" id="export">Export image</button>
+          </div>
+        </form>
+      </details>
+    </div>
+  </section>
+
+  <section class="board" id="board" aria-labelledby="board-title">
+    <div class="container">
+      <div class="board__head">
+        <div class="board__title">
+          <h2 id="board-title">Flights</h2>
+          <p id="count" role="status" aria-live="polite"></p>
+          <button class="btn" type="button" id="pair-clear" hidden>Show all dates</button>
+        </div>
+        <div class="board__sort">
+          <div class="field">
+            <label for="sort">Sort by</label>
+            <select class="input" id="sort" name="sort"></select>
+          </div>
+          <button class="btn" type="button" id="dir">Ascending</button>
+        </div>
+      </div>
+
+      <table class="flights" id="flights">
+        <colgroup>
+          <col class="w-price"><col class="w-date"><col class="w-dep"><col class="w-arr"><col class="w-dur">
+          <col><col class="w-air"><col class="w-total"><col class="w-book">
+        </colgroup>
+        <thead>
+          <tr>
+            <th scope="col" data-sort="price">Price</th>
+            <th scope="col" data-sort="dep">Dates</th>
+            <th scope="col" data-sort="out_dep">Departs</th>
+            <th scope="col">Arrives</th>
+            <th scope="col" data-sort="out_dur">Duration</th>
+            <th scope="col" data-sort="stops">Stops</th>
+            <th scope="col" data-sort="airline">Airline</th>
+            <th scope="col" data-sort="total">Total</th>
+            <th scope="col">Book via</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+
+      <div class="empty" id="empty" hidden>
+        <h3>No flights match these filters.</h3>
+        <p id="empty-why"></p>
+        <button class="btn" type="button" id="empty-clear">Clear filters</button>
+      </div>
+
+      <button class="btn more" type="button" id="more" hidden>Show more</button>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="container">
+    <p id="foot-generated"></p>
+    <p>Prices come from Skyscanner at search time and may have changed since.</p>
+    <p id="foot-partial" hidden></p>
+  </div>
+</footer>
+
+<noscript><p class="container noscript">This report needs JavaScript to sort and filter its flights.</p></noscript>
+
+<script id="report-data" type="application/json">__DATA__</script>
+<script>
+/*__JS__*/
+</script>
+</body>
+</html>

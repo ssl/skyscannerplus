@@ -1,3 +1,5 @@
 downloaded_files/
+results/
 complete_*.json
 skyscannerplus_report_*.html
+__pycache__/
