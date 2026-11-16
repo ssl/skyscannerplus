@@ -6,15 +6,10 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import os
 
+import mycdp.page as cdp_page
+
 SEARCH_API_PATH = "/g/radar/api/v2/web-unified-search"
 
-# Injected via evaluate() (runs in the page's main world) after each navigation
-# and re-run on every poll. It wraps fetch/XHR so responses from the search API
-# are captured client-side and stashed on `window`. We avoid CDP's
-# getResponseBody (which throws on the bodyless CORS-preflight response and
-# tears down the whole CDP connection). The __skyCapInstalled guard makes
-# re-injection a no-op; if the document reloaded, the globals are gone so it
-# reinstalls cleanly.
 INTERCEPTOR_JS = r"""
 (function () {
   if (window.__skyCapInstalled) return;
@@ -27,15 +22,11 @@ INTERCEPTOR_JS = r"""
   function handle(text) {
     try {
       if (!text) return;
-      // Keep the largest payload we've seen as a fallback (the complete
-      // response is the biggest; a late-injected interceptor that missed the
-      // transient "complete" poll can still salvage the fullest data).
       if (text.length > (window.__skyBestLen || 0)) {
         window.__skyBest = text;
         window.__skyBestLen = text.length;
       }
       var head = text.slice(0, 400);
-      // The first "status" in the payload is context.status.
       var m = head.match(/"status"\s*:\s*"([^"]+)"/);
       if (m) {
         window.__skyStatus = m[1];
@@ -123,10 +114,15 @@ class FlightScanner:
         min_days = target_days - days_tolerance
         max_days = target_days + days_tolerance
 
+        last_departure = end_date
+        if self.config.get('latest_departure_date'):
+            last_departure = datetime.strptime(
+                self.config['latest_departure_date'], "%Y-%m-%d")
+
         combinations = []
         current_date = start_date
 
-        while current_date <= end_date:
+        while current_date <= last_departure:
             for vacation_length in range(min_days, max_days + 1):
                 return_date = current_date + timedelta(days=vacation_length)
                 if return_date <= end_date:
@@ -154,16 +150,7 @@ class FlightScanner:
 
 
 class ResponseCapture:
-    """Captures Skyscanner search API responses by polling the page-side
-    interceptor (see INTERCEPTOR_JS).
-
-    In CDP Mode SeleniumBase drives Chrome through the DevTools Protocol
-    (no Selenium WebDriver, no selenium-wire proxy), which is what keeps the
-    bot-detection captcha from appearing. Selenium-wire's response_interceptor
-    is not available here, and pulling bodies via CDP getResponseBody proved
-    fragile, so instead we let the page itself stash the JSON on `window` and
-    read it back with evaluate().
-    """
+    """Capture Skyscanner search API responses."""
 
     def __init__(self):
         self.dep_date = None
@@ -178,8 +165,7 @@ class ResponseCapture:
         self.last_status = None
 
     def try_capture(self, driver) -> bool:
-        """Check the page for a completed response; save it if present.
-        Returns True once a complete response has been saved."""
+        """Save a complete response if one is available."""
         if self.saved:
             return True
         try:
@@ -207,9 +193,7 @@ class ResponseCapture:
         return self._save(response_text)
 
     def save_fallback(self, driver) -> bool:
-        """Last-resort save when no 'complete' response was captured: use the
-        largest response we saw, but only if it actually contains flight
-        results. Better partial data than nothing on a missed complete poll."""
+        """Save the largest response if it contains flight results."""
         if self.saved:
             return True
         try:
@@ -261,19 +245,24 @@ class ResponseCapture:
 
 
 def install_interceptor(driver):
-    """Inject the fetch/XHR interceptor into the current page's main world.
-    Idempotent thanks to the __skyCapInstalled guard, so it's safe to call
-    repeatedly (which also re-installs it after a document reload)."""
+    """Inject the interceptor into the current page."""
     try:
         driver.cdp.evaluate(INTERCEPTOR_JS)
     except Exception:
         pass
 
 
+def register_early_interceptor(driver):
+    """Register the interceptor to run before each page's scripts."""
+    driver.cdp.loop.run_until_complete(
+        driver.cdp.page.send(
+            cdp_page.add_script_to_evaluate_on_new_document(source=INTERCEPTOR_JS)
+        )
+    )
+
+
 def pump(driver, seconds: float):
-    """Run the CDP event loop for `seconds` so queued network events and the
-    body-fetch tasks they schedule actually get processed. CDP Mode's own
-    sleep() is just time.sleep() and does NOT advance the loop."""
+    """Run the CDP event loop for the given duration."""
     driver.cdp.loop.run_until_complete(asyncio.sleep(seconds))
 
 
@@ -286,9 +275,7 @@ def check_for_captcha(driver) -> bool:
 
 
 def handle_captcha(driver, timeout=300):
-    """Under CDP Mode the captcha can be solved by hand and it sticks (the
-    page is not flagged as automated). So we just keep the CDP loop pumping
-    and wait for the human to solve it, detecting completion via the URL."""
+    """Wait for a captcha to be solved manually."""
     print("\n" + "=" * 60)
     print("CAPTCHA DETECTED — please solve it by hand in the browser.")
     print("Waiting for you to complete it...")
@@ -308,7 +295,6 @@ def handle_captcha(driver, timeout=300):
     return False
 
 
-# Locale-specific close button on Skyscanner promo/info popups (.nl site).
 POPUP_CLOSE_SELECTORS = [
     'button[aria-label="Venster sluiten"]',
     'button[aria-label="Close"]',
@@ -329,8 +315,7 @@ def close_popups(driver):
 
 
 def accept_cookies(driver):
-    """Accept the cookie banner if present. It can appear on the homepage and
-    also (re)appear on search-result pages, so this is called repeatedly."""
+    """Accept the cookie banner if it is visible."""
     try:
         if driver.cdp.is_element_visible("#acceptCookieButton"):
             driver.cdp.click_if_visible("#acceptCookieButton")
@@ -341,20 +326,18 @@ def accept_cookies(driver):
 
 
 def build_search_url(config, dep_str, ret_str):
-    """Build the Skyscanner search URL. childrenv2 must be omitted entirely
-    when there are 0 children (Skyscanner treats childrenv2=0 as 1 child)."""
+    """Build a Skyscanner search URL from the config and dates."""
+    children = config.get("children", 0)
+    children_value = "" if not children else str(children)
     params = [
         f'adultsv2={config["adults"]}',
         f'cabinclass={config["cabin"]}',
-    ]
-    if int(config.get("children", 0)) > 0:
-        params.append(f'childrenv2={config["children"]}')
-    params += [
-        'inboundaltsenabled=false',
-        'outboundaltsenabled=false',
-        'preferdirects=false',
+        f'childrenv2={children_value}',
+        'ref=home',
         'rtn=1',
-        'qp_prevCurrency=EUR',
+        'outboundaltsenabled=false',
+        'inboundaltsenabled=false',
+        'preferdirects=false',
     ]
     query = '&'.join(params)
     return (
@@ -368,6 +351,20 @@ def search_flights_simple(config):
 
     scanner = FlightScanner(config)
     date_combinations = scanner.calculate_date_combinations()
+
+
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    past = [c for c in date_combinations if c[0] < today]
+    if past:
+        print(f"WARNING: skipping {len(past)} combinations with a departure "
+              f"date in the past (check search_start_date in config.json).")
+        date_combinations = [c for c in date_combinations if c[0] >= today]
+    if not date_combinations:
+        print("No date combinations left to search - all departures are in "
+              "the past. Update search_start_date/search_end_date in "
+              "config.json.")
+        return
+
     original_total = len(date_combinations)
 
     print(f"Found {original_total} date combinations to search")
@@ -383,7 +380,6 @@ def search_flights_simple(config):
 
     capture = ResponseCapture()
 
-    # uc=True enables undetected mode, required to activate CDP Mode below.
     driver = Driver(
         uc=True,
         headless=False,
@@ -393,9 +389,9 @@ def search_flights_simple(config):
 
     try:
         print("Starting browser in CDP mode...")
-        # Activating CDP Mode swaps the driver into DevTools-Protocol control,
-        # which is the configuration that avoids the bot-detection captcha.
         driver.activate_cdp_mode("https://www.skyscanner.nl/")
+
+        register_early_interceptor(driver)
 
         driver.cdp.set_window_rect(0, 0, 1366, 768)
         pump(driver, random.uniform(4, 7))
@@ -422,7 +418,7 @@ def search_flights_simple(config):
             url = build_search_url(config, dep_str, ret_str)
 
             print("Navigating to search page...")
-            pump(driver, random.uniform(1, 2))
+            pump(driver, random.uniform(0.5, 1))
             driver.cdp.get(url)
             install_interceptor(driver)
             pump(driver, random.uniform(2, 4))
@@ -439,6 +435,15 @@ def search_flights_simple(config):
             accept_cookies(driver)
             install_interceptor(driver)
 
+            try:
+                landed = driver.cdp.get_current_url()
+            except Exception:
+                landed = ""
+            if "oym=" in landed or f"/{dep_str}/{ret_str}/" not in landed:
+                print(f"Redirected to month view instead of results "
+                      f"({landed}) - skipping this date combination.")
+                continue
+
             print("Waiting for complete API response...")
 
             wait_count = 0
@@ -446,8 +451,6 @@ def search_flights_simple(config):
             while not capture.try_capture(driver) and wait_count < 60:
                 pump(driver, 1)
                 wait_count += 1
-                # Re-inject in case the page reloaded (guard makes it a no-op
-                # otherwise), so later polls are always captured.
                 install_interceptor(driver)
 
                 if check_for_captcha(driver):
@@ -462,10 +465,6 @@ def search_flights_simple(config):
                     reloaded = False
                     continue
 
-                # If we've seen no API activity at all after a few seconds, the
-                # search almost certainly completed before the interceptor was
-                # injected (fast/cached result). Reload once to re-run it with
-                # the interceptor already in place.
                 if not reloaded and wait_count == 6 and capture.last_status is None:
                     print("No API activity seen - reloading to re-capture...")
                     reloaded = True
@@ -489,7 +488,7 @@ def search_flights_simple(config):
                     print(f"No complete response after {wait_count}s - moving on")
 
             if i < len(date_combinations) - 1:
-                delay = random.uniform(5, 10)
+                delay = random.uniform(3, 5)
                 print(f"Waiting {delay:.1f}s before next search...")
                 pump(driver, delay)
 
